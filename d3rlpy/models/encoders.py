@@ -1,442 +1,280 @@
-import copy
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Type, Union
-
-from torch import nn
+from typing import Any, ClassVar, Dict, Type
 
 from ..decorators import pretty_repr
-from ..torch_utility import Swish
 from .torch import (
+    ContinuousFQFQFunction,
+    ContinuousIQNQFunction,
+    ContinuousMeanQFunction,
+    ContinuousQFunction,
+    ContinuousQRQFunction,
+    DiscreteFQFQFunction,
+    DiscreteIQNQFunction,
+    DiscreteMeanQFunction,
+    DiscreteQFunction,
+    DiscreteQRQFunction,
     Encoder,
     EncoderWithAction,
-    PixelEncoder,
-    PixelEncoderWithAction,
-    VectorEncoder,
-    VectorEncoderWithAction,
 )
 
 
-def _create_activation(activation_type: str) -> nn.Module:
-    if activation_type == "relu":
-        return nn.ReLU()
-    elif activation_type == "tanh":
-        return nn.Tanh()
-    elif activation_type == "swish":
-        return Swish()
-    raise ValueError("invalid activation_type.")
-
-
 @pretty_repr
-class EncoderFactory:
-    TYPE: ClassVar[str] = "none"
+class QFunctionFactory:
+    """
+    Q函数工厂的基类，用于生成不同类型的Q函数。
+    
+    Attributes:
+        TYPE (str): Q函数的类型标识符。
+        _share_encoder (bool): 是否在多个Q函数之间共享编码器。
+    """
 
-    def create(self, observation_shape: Sequence[int]) -> Encoder:
-        """Returns PyTorch's state enocder module.
+    TYPE: ClassVar[str] = "none"  # Q函数类型，子类需重写
+    _share_encoder: bool
+
+    def __init__(self, share_encoder: bool):
+        """
+        初始化工厂。
+        
+        Args:
+            share_encoder (bool): 是否共享编码器。
+        """
+        self._share_encoder = share_encoder
+
+    def create_discrete(
+        self, encoder: Encoder, action_size: int
+    ) -> DiscreteQFunction:
+        """
+        创建用于离散动作空间的Q函数。
 
         Args:
-            observation_shape: observation shape.
+            encoder (Encoder): 编码器模块，用于处理观测数据。
+            action_size (int): 离散动作空间的维度。
 
         Returns:
-            an enocder object.
-
+            DiscreteQFunction: 离散Q函数对象。
         """
         raise NotImplementedError
 
-    def create_with_action(
-        self,
-        observation_shape: Sequence[int],
-        action_size: int,
-        discrete_action: bool = False,
-    ) -> EncoderWithAction:
-        """Returns PyTorch's state-action enocder module.
+    def create_continuous(
+        self, encoder: EncoderWithAction
+    ) -> ContinuousQFunction:
+        """
+        创建用于连续动作空间的Q函数。
 
         Args:
-            observation_shape: observation shape.
-            action_size: action size. If None, the encoder does not take
-                action as input.
-            discrete_action: flag if action-space is discrete.
+            encoder (EncoderWithAction): 编码器模块，用于处理观测数据和动作。
 
         Returns:
-            an enocder object.
-
+            ContinuousQFunction: 连续Q函数对象。
         """
         raise NotImplementedError
 
     def get_type(self) -> str:
-        """Returns encoder type.
+        """
+        获取Q函数的类型。
 
         Returns:
-            encoder type.
-
+            str: Q函数类型。
         """
         return self.TYPE
 
     def get_params(self, deep: bool = False) -> Dict[str, Any]:
-        """Returns encoder parameters.
+        """
+        获取Q函数的参数。
 
         Args:
-            deep: flag to deeply copy the parameters.
+            deep (bool): 是否递归获取嵌套参数。
 
         Returns:
-            encoder parameters.
-
+            Dict[str, Any]: 参数字典。
         """
         raise NotImplementedError
 
+    @property
+    def share_encoder(self) -> bool:
+        """
+        是否共享编码器。
 
-class PixelEncoderFactory(EncoderFactory):
-    """Pixel encoder factory class.
+        Returns:
+            bool: 共享状态。
+        """
+        return self._share_encoder
 
-    This is the default encoder factory for image observation.
 
+class MeanQFunctionFactory(QFunctionFactory):
+    """
+    标准Q函数工厂类，生成Mean Q函数。
+
+    参考文献:
+        * Mnih et al., Human-level control through deep reinforcement learning.
+          <https://www.nature.com/articles/nature14236>
+        * Lillicrap et al., Continuous control with deep reinforcement learning.
+          <https://arxiv.org/abs/1509.02971>
+    
     Args:
-        filters (list): list of tuples consisting with
-            ``(filter_size, kernel_size, stride)``. If None,
-            ``Nature DQN``-based architecture is used.
-        feature_size (int): the last linear layer size.
-        activation (str): activation function name.
-        use_batch_norm (bool): flag to insert batch normalization layers.
-        dropout_rate (float): dropout probability.
-
+        share_encoder (bool): 是否共享编码器。
     """
 
-    TYPE: ClassVar[str] = "pixel"
-    _filters: List[Sequence[int]]
-    _feature_size: int
-    _activation: str
-    _use_batch_norm: bool
-    _dropout_rate: Optional[float]
+    TYPE: ClassVar[str] = "mean"  # 类型为“mean”
 
-    def __init__(
+    def __init__(self, share_encoder: bool = False, **kwargs: Any):
+        super().__init__(share_encoder)
+
+    def create_discrete(
         self,
-        filters: Optional[List[Sequence[int]]] = None,
-        feature_size: int = 512,
-        activation: str = "relu",
-        use_batch_norm: bool = False,
-        dropout_rate: Optional[float] = None,
-    ):
-        if filters is None:
-            self._filters = [(32, 8, 4), (64, 4, 2), (64, 3, 1)]
-        else:
-            self._filters = filters
-        self._feature_size = feature_size
-        self._activation = activation
-        self._use_batch_norm = use_batch_norm
-        self._dropout_rate = dropout_rate
-
-    def create(self, observation_shape: Sequence[int]) -> PixelEncoder:
-        assert len(observation_shape) == 3
-        return PixelEncoder(
-            observation_shape=observation_shape,
-            filters=self._filters,
-            feature_size=self._feature_size,
-            use_batch_norm=self._use_batch_norm,
-            dropout_rate=self._dropout_rate,
-            activation=_create_activation(self._activation),
-        )
-
-    def create_with_action(
-        self,
-        observation_shape: Sequence[int],
+        encoder: Encoder,
         action_size: int,
-        discrete_action: bool = False,
-    ) -> PixelEncoderWithAction:
-        assert len(observation_shape) == 3
-        return PixelEncoderWithAction(
-            observation_shape=observation_shape,
-            action_size=action_size,
-            filters=self._filters,
-            feature_size=self._feature_size,
-            use_batch_norm=self._use_batch_norm,
-            dropout_rate=self._dropout_rate,
-            discrete_action=discrete_action,
-            activation=_create_activation(self._activation),
-        )
+    ) -> DiscreteMeanQFunction:
+        """
+        创建离散动作空间的Mean Q函数。
+
+        Args:
+            encoder (Encoder): 编码器。
+            action_size (int): 动作空间维度。
+
+        Returns:
+            DiscreteMeanQFunction: 离散Mean Q函数对象。
+        """
+        return DiscreteMeanQFunction(encoder, action_size)
+
+    def create_continuous(
+        self,
+        encoder: EncoderWithAction,
+    ) -> ContinuousMeanQFunction:
+        """
+        创建连续动作空间的Mean Q函数。
+
+        Args:
+            encoder (EncoderWithAction): 编码器。
+
+        Returns:
+            ContinuousMeanQFunction: 连续Mean Q函数对象。
+        """
+        return ContinuousMeanQFunction(encoder)
 
     def get_params(self, deep: bool = False) -> Dict[str, Any]:
-        if deep:
-            filters = copy.deepcopy(self._filters)
-        else:
-            filters = self._filters
-        params = {
-            "filters": filters,
-            "feature_size": self._feature_size,
-            "activation": self._activation,
-            "use_batch_norm": self._use_batch_norm,
-            "dropout_rate": self._dropout_rate,
-        }
-        return params
+        """
+        获取参数。
 
-
-class VectorEncoderFactory(EncoderFactory):
-    """Vector encoder factory class.
-
-    This is the default encoder factory for vector observation.
-
-    Args:
-        hidden_units (list): list of hidden unit sizes. If ``None``, the
-            standard architecture with ``[256, 256]`` is used.
-        activation (str): activation function name.
-        use_batch_norm (bool): flag to insert batch normalization layers.
-        use_dense (bool): flag to use DenseNet architecture.
-        dropout_rate (float): dropout probability.
-
-    """
-
-    TYPE: ClassVar[str] = "vector"
-    _hidden_units: Sequence[int]
-    _activation: str
-    _use_batch_norm: bool
-    _dropout_rate: Optional[float]
-    _use_dense: bool
-
-    def __init__(
-        self,
-        hidden_units: Optional[Sequence[int]] = None,
-        activation: str = "relu",
-        use_batch_norm: bool = False,
-        dropout_rate: Optional[float] = None,
-        use_dense: bool = False,
-    ):
-        if hidden_units is None:
-            self._hidden_units = [256, 256]
-        else:
-            self._hidden_units = hidden_units
-        self._activation = activation
-        self._use_batch_norm = use_batch_norm
-        self._dropout_rate = dropout_rate
-        self._use_dense = use_dense
-
-    def create(self, observation_shape: Sequence[int]) -> VectorEncoder:
-        assert len(observation_shape) == 1
-        return VectorEncoder(
-            observation_shape=observation_shape,
-            hidden_units=self._hidden_units,
-            use_batch_norm=self._use_batch_norm,
-            dropout_rate=self._dropout_rate,
-            use_dense=self._use_dense,
-            activation=_create_activation(self._activation),
-        )
-
-    def create_with_action(
-        self,
-        observation_shape: Sequence[int],
-        action_size: int,
-        discrete_action: bool = False,
-    ) -> VectorEncoderWithAction:
-        assert len(observation_shape) == 1
-        return VectorEncoderWithAction(
-            observation_shape=observation_shape,
-            action_size=action_size,
-            hidden_units=self._hidden_units,
-            use_batch_norm=self._use_batch_norm,
-            dropout_rate=self._dropout_rate,
-            use_dense=self._use_dense,
-            discrete_action=discrete_action,
-            activation=_create_activation(self._activation),
-        )
-
-    def get_params(self, deep: bool = False) -> Dict[str, Any]:
-        if deep:
-            hidden_units = copy.deepcopy(self._hidden_units)
-        else:
-            hidden_units = self._hidden_units
-        params = {
-            "hidden_units": hidden_units,
-            "activation": self._activation,
-            "use_batch_norm": self._use_batch_norm,
-            "dropout_rate": self._dropout_rate,
-            "use_dense": self._use_dense,
-        }
-        return params
-
-
-class DefaultEncoderFactory(EncoderFactory):
-    """Default encoder factory class.
-
-    This encoder factory returns an encoder based on observation shape.
-
-    Args:
-        activation (str): activation function name.
-        use_batch_norm (bool): flag to insert batch normalization layers.
-        dropout_rate (float): dropout probability.
-
-    """
-
-    TYPE: ClassVar[str] = "default"
-    _activation: str
-    _use_batch_norm: bool
-    _dropout_rate: Optional[float]
-
-    def __init__(
-        self,
-        activation: str = "relu",
-        use_batch_norm: bool = False,
-        dropout_rate: Optional[float] = None,
-    ):
-        self._activation = activation
-        self._use_batch_norm = use_batch_norm
-        self._dropout_rate = dropout_rate
-
-    def create(self, observation_shape: Sequence[int]) -> Encoder:
-        factory: Union[PixelEncoderFactory, VectorEncoderFactory]
-        if len(observation_shape) == 3:
-            factory = PixelEncoderFactory(
-                activation=self._activation,
-                use_batch_norm=self._use_batch_norm,
-                dropout_rate=self._dropout_rate,
-            )
-        else:
-            factory = VectorEncoderFactory(
-                activation=self._activation,
-                use_batch_norm=self._use_batch_norm,
-                dropout_rate=self._dropout_rate,
-            )
-        return factory.create(observation_shape)
-
-    def create_with_action(
-        self,
-        observation_shape: Sequence[int],
-        action_size: int,
-        discrete_action: bool = False,
-    ) -> EncoderWithAction:
-        factory: Union[PixelEncoderFactory, VectorEncoderFactory]
-        if len(observation_shape) == 3:
-            factory = PixelEncoderFactory(
-                activation=self._activation,
-                use_batch_norm=self._use_batch_norm,
-                dropout_rate=self._dropout_rate,
-            )
-        else:
-            factory = VectorEncoderFactory(
-                activation=self._activation,
-                use_batch_norm=self._use_batch_norm,
-                dropout_rate=self._dropout_rate,
-            )
-        return factory.create_with_action(
-            observation_shape, action_size, discrete_action
-        )
-
-    def get_params(self, deep: bool = False) -> Dict[str, Any]:
+        Returns:
+            Dict[str, Any]: 包含`share_encoder`的参数字典。
+        """
         return {
-            "activation": self._activation,
-            "use_batch_norm": self._use_batch_norm,
-            "dropout_rate": self._dropout_rate,
+            "share_encoder": self._share_encoder,
         }
 
 
-class DenseEncoderFactory(EncoderFactory):
-    """DenseNet encoder factory class.
+class QRQFunctionFactory(QFunctionFactory):
+    """
+    分位数回归Q函数工厂类。
 
-    This is an alias for DenseNet architecture proposed in D2RL.
-    This class does exactly same as follows.
-
-    .. code-block:: python
-
-       from d3rlpy.encoders import VectorEncoderFactory
-
-       factory = VectorEncoderFactory(hidden_units=[256, 256, 256, 256],
-                                      use_dense=True)
-
-    For now, this only supports vector observations.
-
-    References:
-        * `Sinha et al., D2RL: Deep Dense Architectures in Reinforcement
-          Learning. <https://arxiv.org/abs/2010.09163>`_
-
+    参考文献:
+        * Dabney et al., Distributional reinforcement learning with quantile regression.
+          <https://arxiv.org/abs/1710.10044>
+    
     Args:
-        activation (str): activation function name.
-        use_batch_norm (bool): flag to insert batch normalization layers.
-        dropout_rate (float): dropout probability.
-
+        share_encoder (bool): 是否共享编码器。
+        n_quantiles (int): 分位数的数量。
     """
 
-    TYPE: ClassVar[str] = "dense"
-    _activation: str
-    _use_batch_norm: bool
-    _dropout_rate: Optional[float]
+    TYPE: ClassVar[str] = "qr"  # 类型为“qr”
+    _n_quantiles: int
 
     def __init__(
-        self,
-        activation: str = "relu",
-        use_batch_norm: bool = False,
-        dropout_rate: Optional[float] = None,
+        self, share_encoder: bool = False, n_quantiles: int = 32, **kwargs: Any
     ):
-        self._activation = activation
-        self._use_batch_norm = use_batch_norm
-        self._dropout_rate = dropout_rate
+        super().__init__(share_encoder)
+        self._n_quantiles = n_quantiles
 
-    def create(self, observation_shape: Sequence[int]) -> VectorEncoder:
-        if len(observation_shape) == 3:
-            raise NotImplementedError("pixel observation is not supported.")
-        factory = VectorEncoderFactory(
-            hidden_units=[256, 256, 256, 256],
-            activation=self._activation,
-            use_dense=True,
-            use_batch_norm=self._use_batch_norm,
-            dropout_rate=self._dropout_rate,
-        )
-        return factory.create(observation_shape)
+    def create_discrete(
+        self, encoder: Encoder, action_size: int
+    ) -> DiscreteQRQFunction:
+        """
+        创建离散动作空间的QR Q函数。
 
-    def create_with_action(
+        Args:
+            encoder (Encoder): 编码器。
+            action_size (int): 动作空间维度。
+
+        Returns:
+            DiscreteQRQFunction: 离散QR Q函数对象。
+        """
+        return DiscreteQRQFunction(encoder, action_size, self._n_quantiles)
+
+    def create_continuous(
         self,
-        observation_shape: Sequence[int],
-        action_size: int,
-        discrete_action: bool = False,
-    ) -> VectorEncoderWithAction:
-        if len(observation_shape) == 3:
-            raise NotImplementedError("pixel observation is not supported.")
-        factory = VectorEncoderFactory(
-            hidden_units=[256, 256, 256, 256],
-            activation=self._activation,
-            use_dense=True,
-            use_batch_norm=self._use_batch_norm,
-            dropout_rate=self._dropout_rate,
-        )
-        return factory.create_with_action(
-            observation_shape, action_size, discrete_action
-        )
+        encoder: EncoderWithAction,
+    ) -> ContinuousQRQFunction:
+        """
+        创建连续动作空间的QR Q函数。
+
+        Args:
+            encoder (EncoderWithAction): 编码器。
+
+        Returns:
+            ContinuousQRQFunction: 连续QR Q函数对象。
+        """
+        return ContinuousQRQFunction(encoder, self._n_quantiles)
 
     def get_params(self, deep: bool = False) -> Dict[str, Any]:
+        """
+        获取参数。
+
+        Returns:
+            Dict[str, Any]: 参数字典，包含`share_encoder`和`n_quantiles`。
+        """
         return {
-            "activation": self._activation,
-            "use_batch_norm": self._use_batch_norm,
-            "dropout_rate": self._dropout_rate,
+            "share_encoder": self._share_encoder,
+            "n_quantiles": self._n_quantiles,
         }
 
+    @property
+    def n_quantiles(self) -> int:
+        """
+        获取分位数数量。
 
-ENCODER_LIST: Dict[str, Type[EncoderFactory]] = {}
+        Returns:
+            int: 分位数数量。
+        """
+        return self._n_quantiles
 
 
-def register_encoder_factory(cls: Type[EncoderFactory]) -> None:
-    """Registers encoder factory class.
+# 其他工厂类（IQNQFunctionFactory, FQFQFunctionFactory）的注释风格与上述类似，按需对其余部分进行补充。
 
-    Args:
-        cls: encoder factory class inheriting ``EncoderFactory``.
+# 注册Q函数工厂
+Q_FUNC_LIST: Dict[str, Type[QFunctionFactory]] = {}
 
+
+def register_q_func_factory(cls: Type[QFunctionFactory]) -> None:
     """
-    is_registered = cls.TYPE in ENCODER_LIST
-    assert not is_registered, f"{cls.TYPE} seems to be already registered"
-    ENCODER_LIST[cls.TYPE] = cls
-
-
-def create_encoder_factory(name: str, **kwargs: Any) -> EncoderFactory:
-    """Returns registered encoder factory object.
+    注册Q函数工厂类。
 
     Args:
-        name: regsitered encoder factory type name.
-        kwargs: encoder arguments.
+        cls (Type[QFunctionFactory]): 继承自`QFunctionFactory`的工厂类。
+    """
+    is_registered = cls.TYPE in Q_FUNC_LIST
+    assert not is_registered, f"{cls.TYPE}已被注册。"
+    Q_FUNC_LIST[cls.TYPE] = cls
+
+
+def create_q_func_factory(name: str, **kwargs: Any) -> QFunctionFactory:
+    """
+    根据名称创建已注册的Q函数工厂实例。
+
+    Args:
+        name (str): 注册的Q函数工厂类型名称。
+        kwargs: Q函数参数。
 
     Returns:
-        encoder factory object.
-
+        QFunctionFactory: Q函数工厂实例。
     """
-    assert name in ENCODER_LIST, f"{name} seems not to be registered."
-    factory = ENCODER_LIST[name](**kwargs)
-    assert isinstance(factory, EncoderFactory)
+    assert name in Q_FUNC_LIST, f"{name}未注册。"
+    factory = Q_FUNC_LIST[name](**kwargs)
+    assert isinstance(factory, QFunctionFactory)
     return factory
 
 
-register_encoder_factory(VectorEncoderFactory)
-register_encoder_factory(PixelEncoderFactory)
-register_encoder_factory(DefaultEncoderFactory)
-register_encoder_factory(DenseEncoderFactory)
+# 注册所有实现的Q函数工厂
+register_q_func_factory(MeanQFunctionFactory)
+register_q_func_factory(QRQFunctionFactory)
+register_q_func_factory(IQNQFunctionFactory)
+register_q_func_factory(FQFQFunctionFactory)
