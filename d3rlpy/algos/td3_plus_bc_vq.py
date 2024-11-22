@@ -194,49 +194,84 @@ class TD3PlusBC_VQ(AlgoBase):
             self._impl._targ_policy.vq_input.disable_update_codebook()  # No need to update
 
     def _update(self, batch: TransitionMiniBatch) -> Dict[str, float]:
+        """
+        更新模型参数，包括Critic和Actor的优化步骤。
+    
+        Args:
+            batch (TransitionMiniBatch): 包含采样的状态、动作、奖励、下一状态等数据的小批量样本。
+    
+        Returns:
+            Dict[str, float]: 包含损失值和预测值的指标字典。
+        
+        Raises:
+            ValueError: 如果返回的日志长度与预期不符。
+        """
+        # 确保实现已经初始化
         assert self._impl is not None, IMPL_NOT_INITIALIZED_ERROR
+        # 确保编码字典（codebooks）在策略和目标策略之间保持同步
         assert (self._impl._policy.vq_input.codebooks == self._impl._targ_policy.vq_input.codebooks).all(), "Codebooks have not sync yet."
-
+    
         metrics = {}
-
+    
+        # 如果使用向量量化输入，则禁用更新编码字典的能力
         if self._use_vq_in:
             self._impl._policy.vq_input.disable_update_codebook()
+    
+        # 更新Critic网络并获取总损失和额外日志
         critic_total_loss, extra_logs = self._impl.update_critic(batch)
         if len(extra_logs) == 4:
             q_target, current_q1, current_q2, critic_loss = extra_logs
         else:
-            raise ValueError
-
+            raise ValueError("Critic extra logs should contain exactly 4 elements.")
+    
+        # 将Critic相关的指标记录到metrics中
         metrics.update({
-            "critic_total_loss": critic_total_loss,
-            "critic_loss": critic_loss,
-            "q_target": q_target,
-            "q1_prediction": current_q1,
-            "q2_prediction": current_q2,
+            "critic_total_loss": critic_total_loss,  # Critic总损失
+            "critic_loss": critic_loss,              # Critic单独损失
+            "q_target": q_target,                    # Q值的目标值
+            "q1_prediction": current_q1,             # 第一个Critic网络的Q值预测
+            "q2_prediction": current_q2,             # 第二个Critic网络的Q值预测
         })
-
-        # delayed policy update
+    
+        # 延迟策略更新，每隔固定步长更新一次Actor
         if self._grad_step % self._update_actor_interval == 0:
+            # 如果使用向量量化输入，则重新启用更新编码字典的能力
             if self._use_vq_in:
                 self._impl._policy.vq_input.enable_update_codebook()
+    
+            # 更新Actor网络并获取总损失和额外日志
             actor_total_loss, extra_logs = self._impl.update_actor(batch)
             if len(extra_logs) == 3:
                 actor_loss, bc_loss, vq_loss = extra_logs
             else:
-                raise ValueError
-
+                raise ValueError("Actor extra logs should contain exactly 3 elements.")
+    
+            # 将Actor相关的指标记录到metrics中
             metrics.update({
-                "actor_total_loss": actor_total_loss,
-                "actor_loss": actor_loss,
-                "bc_loss": bc_loss,
-                "vq_loss": vq_loss,
+                "actor_total_loss": actor_total_loss,  # Actor总损失
+                "actor_loss": actor_loss,              # Actor单独损失
+                "bc_loss": bc_loss,                    # 行为克隆损失（Behavior Cloning Loss）
+                "vq_loss": vq_loss,                    # 向量量化损失（Vector Quantization Loss）
             })
+    
+            # 更新Critic目标网络
             self._impl.update_critic_target()
+            # 更新Actor目标网络
             self._impl.update_actor_target()
+    
+            # 如果使用向量量化输入，则同步编码字典
             if self._use_vq_in:
-                self._impl.sync_codebook_from_policy()  # Must be updated after soft update critic/actor
-
-        return metrics
-
+                self._impl.sync_codebook_from_policy()  # 在软更新Critic/Actor后执行同步
+    
+        return metrics  # 返回所有记录的指标
+    
+    
     def get_action_type(self) -> ActionSpace:
+        """
+        获取动作空间类型。
+    
+        Returns:
+            ActionSpace: 动作空间类型（此处为连续动作空间）。
+        """
         return ActionSpace.CONTINUOUS
+
